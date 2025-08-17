@@ -303,7 +303,8 @@ impl vr::IVRCompositor029_Interface for Compositor {
         _pPoseArray: *mut vr::TrackedDevicePose_t,
         _unPoseArrayCount: u32,
     ) -> vr::EVRCompositorError {
-        todo!()
+        crate::warn_unimplemented!("GetPosesForFrame");
+        vr::EVRCompositorError::RequestFailed
     }
     fn GetLastPosePredictionIDs(
         &self,
@@ -311,7 +312,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         _pGamePosePredictionID: *mut u32,
     ) -> vr::EVRCompositorError {
         crate::warn_unimplemented!("GetLastPosePredictionIDs");
-        vr::EVRCompositorError::None
+        vr::EVRCompositorError::RequestFailed
     }
     fn GetCompositorBenchmarkResults(
         &self,
