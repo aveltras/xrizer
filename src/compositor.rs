@@ -70,6 +70,8 @@ impl FrameState {
 struct FrameMetrics {
     system_start: Instant,
     index: AtomicU32,
+    /// Advanced on every WaitGetPoses, whether or not the app submits.
+    prediction_id: AtomicU32,
     time: AtomicF64,
 }
 
@@ -91,6 +93,7 @@ impl Compositor {
             metrics: FrameMetrics {
                 system_start: Instant::now(),
                 index: 0.into(),
+                prediction_id: 0.into(),
                 time: 0.0.into(),
             },
             timing_mode: vr::EVRCompositorTimingMode::Implicit.into(),
@@ -321,7 +324,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         render_pose_prediction_id: *mut u32,
         game_pose_prediction_id: *mut u32,
     ) -> vr::EVRCompositorError {
-        let index = self.metrics.index.load(Ordering::Relaxed);
+        let index = self.metrics.prediction_id.load(Ordering::Relaxed);
         if !render_pose_prediction_id.is_null() {
             unsafe {
                 render_pose_prediction_id.write(index);
@@ -892,6 +895,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         tracy_span!("WaitGetPoses impl");
         // This should be called every frame - we must regularly poll events
         self.openxr.poll_events();
+        self.metrics.prediction_id.fetch_add(1, Ordering::Relaxed);
         self.focused.call_once(|| {});
         {
             let session_data = self.openxr.session_data.get();
