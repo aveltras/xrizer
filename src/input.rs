@@ -465,10 +465,22 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
         &self,
         _: vr::VRActionSetHandle_t,
         _: vr::VRActionHandle_t,
-        _: *mut vr::VRInputValueHandle_t,
-        _: u32,
+        origins_out: *mut vr::VRInputValueHandle_t,
+        origin_out_count: u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetActionOrigins");
+        if origins_out.is_null() {
+            return vr::EVRInputError::InvalidParam;
+        }
+        // Hitman reads every slot back, so the unused ones must be invalid handles.
+        let origins =
+            unsafe { std::slice::from_raw_parts_mut(origins_out, origin_out_count as usize) };
+        origins.fill(vr::k_ulInvalidInputValueHandle);
+        for (slot, key) in origins
+            .iter_mut()
+            .zip([self.left_hand_key, self.right_hand_key])
+        {
+            *slot = key.data().as_ffi();
+        }
         vr::EVRInputError::None
     }
     fn TriggerHapticVibrationAction(
