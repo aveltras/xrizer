@@ -155,6 +155,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             extra_actions,
             per_profile_bindings,
             per_profile_pose_bindings,
+            per_profile_binding_info,
             ..
         } = binding_context;
 
@@ -226,6 +227,11 @@ impl<C: openxr_data::Compositor> Input<C> {
             .map(|(k, v)| (k, action_map_to_secondary(&mut act_guard, v)))
             .collect();
 
+        let per_profile_binding_info = per_profile_binding_info
+            .into_iter()
+            .map(|(k, v)| (k, action_map_to_secondary(&mut act_guard, v)))
+            .collect();
+
         let loaded = super::ManifestLoadedActions {
             sets,
             actions,
@@ -233,6 +239,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             extra_actions,
             per_profile_bindings,
             per_profile_pose_bindings,
+            per_profile_binding_info,
             _info_action: info_action,
             info_set,
             haptic_action,
@@ -297,7 +304,8 @@ impl<C: openxr_data::Compositor> Input<C> {
                     info!("Ignoring bindings for unknown profile {other}")
                 }
                 ref other => {
-                    let mut runner = Runner(self, context, bindings);
+                    let infos = super::BindingInfo::from_binding_file(&data);
+                    let mut runner = Runner(self, context, bindings, infos);
                     other.run_for_profile(&mut runner);
 
                     // lifetime moment
@@ -305,6 +313,7 @@ impl<C: openxr_data::Compositor> Input<C> {
                         &'a Input<C>,
                         &'b mut BindingsLoadContext<'c>,
                         bindings::Bindings,
+                        Vec<(String, super::BindingInfo)>,
                     );
                     impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, '_, '_, C> {
                         fn run<P: super::InteractionProfile>(&mut self) {
@@ -316,6 +325,17 @@ impl<C: openxr_data::Compositor> Input<C> {
                                     "Couldn't create context for profile {}?",
                                     std::any::type_name::<P>()
                                 );
+                                return;
+                            }
+                            let profile = self
+                                .0
+                                .openxr
+                                .instance
+                                .string_to_path(P::profile_path())
+                                .unwrap();
+                            let map = self.1.per_profile_binding_info.entry(profile).or_default();
+                            for (action, info) in &self.3 {
+                                map.entry(action.clone()).or_default().push(info.clone());
                             }
                         }
                     }

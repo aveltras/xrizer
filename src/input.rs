@@ -401,15 +401,59 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
     }
     fn GetActionBindingInfo(
         &self,
-        _: vr::VRActionHandle_t,
-        _: *mut vr::InputBindingInfo_t,
-        _: u32,
-        _: u32,
+        action: vr::VRActionHandle_t,
+        info_out: *mut vr::InputBindingInfo_t,
+        info_size: u32,
+        info_count: u32,
         returned_binding_info_count: *mut u32,
     ) -> vr::EVRInputError {
-        crate::warn_unimplemented!("GetActionBindingInfo");
         if !returned_binding_info_count.is_null() {
             unsafe { *returned_binding_info_count = 0 };
+        }
+        if info_size as usize != std::mem::size_of::<vr::InputBindingInfo_t>() {
+            return vr::EVRInputError::InvalidParam;
+        }
+
+        let session = self.openxr.session_data.get();
+        let Some(LoadedActions::Manifest(loaded)) = session.input_data.actions.get() else {
+            return vr::EVRInputError::None;
+        };
+        let key = ActionKey::from(KeyData::from_ffi(action));
+
+        // Report the sources of the binding file for whatever controllers are in use,
+        // which games such as Hitman read to pick the button glyphs.
+        let mut infos: Vec<&BindingInfo> = Vec::new();
+        for hand in [Hand::Left, Hand::Right] {
+            let Ok(profile) = session
+                .session
+                .current_interaction_profile(self.get_subaction_path(hand))
+            else {
+                continue;
+            };
+            let Some(bound) = loaded
+                .per_profile_binding_info
+                .get(&profile)
+                .and_then(|m| m.get(key))
+            else {
+                continue;
+            };
+            for info in bound {
+                if !infos.contains(&info) {
+                    infos.push(info);
+                }
+            }
+        }
+
+        let count = infos.len().min(info_count as usize);
+        if count > 0 && !info_out.is_null() {
+            let out = unsafe { std::slice::from_raw_parts_mut(info_out, count) };
+            for (o, info) in out.iter_mut().zip(&infos) {
+                *o = unsafe { std::mem::zeroed() };
+                info.write_to(o);
+            }
+        }
+        if !returned_binding_info_count.is_null() {
+            unsafe { *returned_binding_info_count = count as u32 };
         }
         vr::EVRInputError::None
     }
@@ -1614,6 +1658,69 @@ impl<C: openxr_data::Compositor> Input<C> {
     }
 }
 
+/// One source of an action in a SteamVR binding file, as GetActionBindingInfo reports it.
+#[derive(Clone, PartialEq)]
+struct BindingInfo {
+    device_path: String,
+    input_path: String,
+    mode: String,
+    slot: String,
+}
+
+impl BindingInfo {
+    /// Lists every action output in a SteamVR binding file, keyed by lowercase action path.
+    fn from_binding_file(data: &[u8]) -> Vec<(String, Self)> {
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(data) else {
+            return Vec::new();
+        };
+        let mut infos = Vec::new();
+        let sets = json["bindings"].as_object().into_iter().flatten();
+        for source in sets.flat_map(|(_, set)| set["sources"].as_array().into_iter().flatten()) {
+            let (Some(path), Some(mode), Some(inputs)) = (
+                source["path"].as_str(),
+                source["mode"].as_str(),
+                source["inputs"].as_object(),
+            ) else {
+                continue;
+            };
+            let Some(idx) = path.find("/input/") else {
+                continue;
+            };
+            for (slot, input) in inputs {
+                let Some(output) = input["output"].as_str() else {
+                    continue;
+                };
+                infos.push((
+                    output.to_ascii_lowercase(),
+                    Self {
+                        device_path: path[..idx].to_owned(),
+                        input_path: path[idx..].to_owned(),
+                        mode: mode.to_owned(),
+                        slot: slot.clone(),
+                    },
+                ));
+            }
+        }
+        infos
+    }
+
+    fn write_to(&self, out: &mut vr::InputBindingInfo_t) {
+        fn copy(dst: &mut [c_char], src: &str) {
+            let len = src.len().min(dst.len() - 1);
+            for (d, s) in dst.iter_mut().zip(&src.as_bytes()[..len]) {
+                *d = *s as c_char;
+            }
+            dst[len] = 0;
+        }
+        copy(&mut out.rchDevicePathName, &self.device_path);
+        copy(&mut out.rchInputPathName, &self.input_path);
+        copy(&mut out.rchModeName, &self.mode);
+        copy(&mut out.rchSlotName, &self.slot);
+        // SteamVR reports the component type here; the mode is the closest we have.
+        copy(&mut out.rchInputSourceType, &self.mode);
+    }
+}
+
 enum LoadedActions {
     Legacy(LegacyActionData),
     Manifest(ManifestLoadedActions),
@@ -1626,6 +1733,7 @@ struct ManifestLoadedActions {
     actions_with_custom_bindings: HashSet<ActionKey>,
     per_profile_pose_bindings: HashMap<xr::Path, SecondaryMap<ActionKey, BoundPose>>,
     per_profile_bindings: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<BoolBindingData>>>,
+    per_profile_binding_info: HashMap<xr::Path, SecondaryMap<ActionKey, Vec<BindingInfo>>>,
     info_set: xr::ActionSet,
     _info_action: xr::Action<bool>,
     haptic_set: xr::ActionSet,
