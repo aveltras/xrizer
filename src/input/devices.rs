@@ -85,17 +85,14 @@ pub struct TrackedDevice {
 }
 
 fn get_hmd_pose(
-    xr_data: &OpenXrData<impl crate::openxr_data::Compositor>,
     session_data: &SessionData,
     origin: vr::ETrackingUniverseOrigin,
+    time: xr::Time,
 ) -> Option<vr::TrackedDevicePose_t> {
     let (location, velocity) = {
         session_data
             .view_space
-            .relate(
-                session_data.get_space_for_origin(origin),
-                xr_data.display_time.get(),
-            )
+            .relate(session_data.get_space_for_origin(origin), time)
             .ok()?
     };
 
@@ -103,10 +100,10 @@ fn get_hmd_pose(
 }
 
 fn get_controller_pose(
-    xr_data: &OpenXrData<impl crate::openxr_data::Compositor>,
     session_data: &SessionData,
     controller: &TrackedDevice,
     origin: vr::ETrackingUniverseOrigin,
+    time: xr::Time,
 ) -> Option<vr::TrackedDevicePose_t> {
     let pose_data = session_data.input_data.pose_data.get()?;
 
@@ -118,11 +115,8 @@ fn get_controller_pose(
     let (location, velocity) = if let Some(raw) =
         spaces.try_get_or_init_raw(&controller.profile_data, session_data, pose_data)
     {
-        raw.relate(
-            session_data.get_space_for_origin(origin),
-            xr_data.display_time.get(),
-        )
-        .ok()?
+        raw.relate(session_data.get_space_for_origin(origin), time)
+            .ok()?
     } else {
         trace!("Failed to get raw space, returning empty pose");
         (xr::SpaceLocation::default(), xr::SpaceVelocity::default())
@@ -133,20 +127,17 @@ fn get_controller_pose(
 
 #[cfg(feature = "monado")]
 fn get_generic_tracker_pose(
-    xr_data: &OpenXrData<impl crate::openxr_data::Compositor>,
     session_data: &SessionData,
     tracker: &TrackedDevice,
     origin: vr::ETrackingUniverseOrigin,
+    time: xr::Time,
 ) -> Option<vr::TrackedDevicePose_t> {
     let TrackedDeviceType::GenericTracker { space, .. } = tracker.get_type() else {
         return None;
     };
 
     let (location, velocity) = space
-        .relate(
-            session_data.get_space_for_origin(origin),
-            xr_data.display_time.get(),
-        )
+        .relate(session_data.get_space_for_origin(origin), time)
         .ok()?;
 
     Some(vr::space_relation_to_openvr_pose(location, velocity))
@@ -179,18 +170,27 @@ impl TrackedDevice {
             return Some(pose);
         }
 
-        *pose_cache = match self.device_type {
-            TrackedDeviceType::Hmd => get_hmd_pose(xr_data, session_data, origin),
+        *pose_cache = self.get_pose_at(session_data, origin, xr_data.display_time.get());
+        *pose_cache
+    }
+
+    /// Locates the device at an arbitrary time, bypassing the per-frame cache.
+    pub fn get_pose_at(
+        &self,
+        session_data: &SessionData,
+        origin: vr::ETrackingUniverseOrigin,
+        time: xr::Time,
+    ) -> Option<vr::TrackedDevicePose_t> {
+        match self.device_type {
+            TrackedDeviceType::Hmd => get_hmd_pose(session_data, origin, time),
             TrackedDeviceType::Controller { .. } => {
-                get_controller_pose(xr_data, session_data, self, origin)
+                get_controller_pose(session_data, self, origin, time)
             }
             #[cfg(feature = "monado")]
             TrackedDeviceType::GenericTracker { .. } => {
-                get_generic_tracker_pose(xr_data, session_data, self, origin)
+                get_generic_tracker_pose(session_data, self, origin, time)
             }
-        };
-
-        *pose_cache
+        }
     }
 
     pub fn get_hand_skeleton(
@@ -488,6 +488,20 @@ impl<C: openxr_data::Compositor> Input<C> {
                         &session_data,
                         origin.unwrap_or(session_data.current_origin),
                     )
+                    .unwrap_or_default();
+            }
+        }
+    }
+
+    /// Like get_poses, but predicted for the given time instead of the current frame.
+    pub fn get_poses_at(&self, poses: &mut [vr::TrackedDevicePose_t], time: xr::Time) {
+        let session_data = self.openxr.session_data.get();
+        let devices = session_data.input_data.devices.read().unwrap();
+
+        for (i, pose) in poses.iter_mut().enumerate() {
+            if let Some(device) = devices.get_device(i as u32) {
+                *pose = device
+                    .get_pose_at(&session_data, session_data.current_origin, time)
                     .unwrap_or_default();
             }
         }
