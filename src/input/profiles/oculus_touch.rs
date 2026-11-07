@@ -66,6 +66,16 @@ impl InteractionProfile for OculusTouch {
                 component: Some(DynComponent::Click),
                 ..
             } => Some(p.with_component(DynComponent::Value)),
+            // SteamVR reports the left Touch menu button as /input/system.
+            DynInputPath {
+                hand: Hand::Left,
+                subpath: DynSubpath::System,
+                component: Some(DynComponent::Click),
+            } => Some(DynInputPath {
+                hand: Hand::Left,
+                subpath: DynSubpath::Menu,
+                component: Some(DynComponent::Click),
+            }),
             _ => None,
         }
     }
