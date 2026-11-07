@@ -70,6 +70,8 @@ impl FrameState {
 struct FrameMetrics {
     system_start: Instant,
     index: AtomicU32,
+    /// Advanced on every WaitGetPoses, whether or not the app submits.
+    prediction_id: AtomicU32,
     time: AtomicF64,
 }
 
@@ -91,6 +93,7 @@ impl Compositor {
             metrics: FrameMetrics {
                 system_start: Instant::now(),
                 index: 0.into(),
+                prediction_id: 0.into(),
                 time: 0.0.into(),
             },
             timing_mode: vr::EVRCompositorTimingMode::Implicit.into(),
@@ -306,22 +309,39 @@ impl openxr_data::Compositor for Compositor {
 impl vr::IVRCompositor029_Interface for Compositor {
     fn GetPosesForFrame(
         &self,
-        _id: u32,
+        id: u32,
         pose_array: *mut vr::TrackedDevicePose_t,
         pose_array_count: u32,
     ) -> vr::EVRCompositorError {
+        let current = self.metrics.prediction_id.load(Ordering::Relaxed);
         if pose_array.is_null() || pose_array_count == 0 {
             return vr::EVRCompositorError::RequestFailed;
         }
 
-        self.GetLastPoses(pose_array, pose_array_count, std::ptr::null_mut(), 0)
+        // IDs count headset vsyncs, and games may ask for a frame other than the current one:
+        // Hitman's game thread asks for poses 6 frames ahead, since that is when what it
+        // simulates will be displayed. Predict for that frame, within a reasonable range.
+        let frames_ahead = (id.wrapping_sub(current) as i32).clamp(-8, 8);
+        if frames_ahead == 0 {
+            return self.GetLastPoses(pose_array, pose_array_count, std::ptr::null_mut(), 0);
+        }
+        let period = self.openxr.display_period_nanos.load(Ordering::Relaxed);
+        let time = xr::Time::from_nanos(
+            self.openxr.display_time.get().as_nanos() + frames_ahead as i64 * period,
+        );
+        let poses =
+            unsafe { std::slice::from_raw_parts_mut(pose_array, pose_array_count as usize) };
+        self.input
+            .force(|_| Input::new(self.openxr.clone()))
+            .get_poses_at(poses, time);
+        vr::EVRCompositorError::None
     }
     fn GetLastPosePredictionIDs(
         &self,
         render_pose_prediction_id: *mut u32,
         game_pose_prediction_id: *mut u32,
     ) -> vr::EVRCompositorError {
-        let index = self.metrics.index.load(Ordering::Relaxed);
+        let index = self.metrics.prediction_id.load(Ordering::Relaxed);
         if !render_pose_prediction_id.is_null() {
             unsafe {
                 render_pose_prediction_id.write(index);
@@ -892,6 +912,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
         tracy_span!("WaitGetPoses impl");
         // This should be called every frame - we must regularly poll events
         self.openxr.poll_events();
+        self.metrics.prediction_id.fetch_add(1, Ordering::Relaxed);
         self.focused.call_once(|| {});
         {
             let session_data = self.openxr.session_data.get();
